@@ -1,0 +1,10 @@
+# secrets & local config
+.env
+.env.*
+!.env.example
+*.local
+
+# scratch / working files
+scratch/
+*.tmp
+out-*.md
