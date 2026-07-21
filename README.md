@@ -22,6 +22,7 @@ If you have ever run one of these CLIs from a script, a CI step, or an agent har
 | `inotify_add_watch … No space left on device` at opencode startup | The inotify **watch** limit, not disk. Only the file watcher dies; the run continues. | Non-fatal — don't kill/retry. Raise `fs.inotify.max_user_watches` if it bothers you. |
 | `kimi -r <session_id>` hangs forever — and the CLI itself told you to run it | Every headless `kimi -p` run ends by printing `To resume this session: kimi -r <id>`, but `-r` is not a headless flag: it drops into the interactive TUI, which then blocks on the harness's never-closing stdin. | Resume with `-S <id> -p "…"` instead. Read the id machine-readably from `--output-format stream-json` (`{"type":"session.resume_hint","session_id":…}`). |
 | `kimi -p … -y` (or `--auto`) does nothing: `error: Cannot combine --prompt with --yolo` | Unlike the other three CLIs, kimi's headless prompt mode already auto-approves tool calls, so the permission flags are rejected as contradictory rather than redundant. | Drop the flag — plain `kimi -p "…"` already reads *and writes* files. |
+| A CLI runs fine in your terminal but is `command not found` from your agent harness / CI | Its installer only put its bin dir on `PATH` by appending to `~/.bashrc`, which non-interactive callers never source. (`kimi` installs to `~/.kimi-code/bin` this way.) | Link the binary into a dir already on the inherited `PATH`: `ln -sf ~/.kimi-code/bin/kimi ~/.local/bin/kimi`. In-place upgrades keep the link valid. |
 | A JS-runtime CLI dies at login with an empty `fetch failed:` while `curl` to the same host works | The host has no IPv6 route, but the endpoint's DNS lists IPv6 first. Node-style `fetch` honours DNS order verbatim and never falls back; `curl` retries on IPv4 by itself, which is why manual testing "proves" the network is fine. | Make the resolver prefer IPv4 host-wide: `echo 'precedence ::ffff:0:0/96  100' \| sudo tee -a /etc/gai.conf`. Verify with `getent ahosts <host>` — `getent hosts` uses a legacy path that ignores `gai.conf`. |
 
 Every row is reproduced and fixed by the skill. The rest of this README is the setup and the recipes.
@@ -165,6 +166,10 @@ Smoke test: `agy -p "reply: ok" < /dev/null`
 curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash   # single binary, no Node required
 kimi --version
 kimi login                          # device-code flow; prints a URL + code, works over SSH
+
+# required for headless use: the installer only exports ~/.kimi-code/bin from ~/.bashrc, which
+# agent harnesses and CI never source — link it somewhere already on the inherited PATH
+ln -sf ~/.kimi-code/bin/kimi ~/.local/bin/kimi
 ```
 
 Default model and reasoning effort live in `~/.kimi-code/config.toml`. There is **no CLI effort flag** — set it here:
@@ -243,7 +248,7 @@ This project stands on a lot of shoulders and deliberately does **not** try to b
 - **[antonbabenko/deliberation](https://github.com/antonbabenko/deliberation)** — a subscription-auth `codex` + `agy` deliberation stack; close cousin of the peer-teammate recipe here.
 - **Aseem Shrey's codex-review skill** — the `codex exec resume` multi-turn-review mechanism the peer-teammate recipe builds on; credit for demonstrating that pattern.
 
-What this repo adds that isn't written down elsewhere: the per-process `XDG_DATA_HOME` isolation for opencode's shared-SQLite bug, the DeepSeek relative-path-mangling → silent-empty-read rule, the `< /dev/null` stdin-deadlock fix, the output-truncation shape-check, kimi's `-r`-hint-that-hangs and its `-p`-is-already-autonomous inversion, the IPv6-first DNS trap that kills JS-runtime CLIs on IPv4-only hosts, and framing the multi-turn `resume` loop as an open-ended peer *teammate* rather than only a review gate. If you're building an orchestrator, treat this as the hardening notes to fold into it.
+What this repo adds that isn't written down elsewhere: the per-process `XDG_DATA_HOME` isolation for opencode's shared-SQLite bug, the DeepSeek relative-path-mangling → silent-empty-read rule, the `< /dev/null` stdin-deadlock fix, the output-truncation shape-check, kimi's `-r`-hint-that-hangs and its `-p`-is-already-autonomous inversion, the `~/.bashrc`-only PATH install that makes a CLI invisible to every non-interactive caller, the IPv6-first DNS trap that kills JS-runtime CLIs on IPv4-only hosts, and framing the multi-turn `resume` loop as an open-ended peer *teammate* rather than only a review gate. If you're building an orchestrator, treat this as the hardening notes to fold into it.
 
 ---
 
