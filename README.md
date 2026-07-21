@@ -1,8 +1,8 @@
 # headless-cli-playbook
 
-**headless-cli-playbook is the operational-hardening layer for driving three coding-agent CLIs — OpenAI's `codex`, `opencode`, and Google Antigravity's `agy` — headlessly and in parallel: the stdin deadlocks, silent empty reads, SQLite races, and truncated outputs the vendor docs never warn you about, each paired with the exact one-line fix.**
+**headless-cli-playbook is the operational-hardening layer for driving four coding-agent CLIs — OpenAI's `codex`, `opencode`, Google Antigravity's `agy`, and Moonshot's `kimi` — headlessly and in parallel: the stdin deadlocks, silent empty reads, SQLite races, truncated outputs, and self-contradicting resume hints the vendor docs never warn you about, each paired with the exact one-line fix.**
 
-It is *not* another "get a second opinion from another model" orchestrator — that space is well served already (see [Prior art & credits](#prior-art--credits)). This repo is the part nobody writes down: the ten or so failure modes that turn a headless `codex exec` / `opencode run` / `agy -p` call into a hung terminal or an empty file, and how to make each one stop happening. The payload is one copy-installable Claude Code skill (`skills/headless-cli/SKILL.md`) that encodes every fix as a rule, plus this README explaining the *why*.
+It is *not* another "get a second opinion from another model" orchestrator — that space is well served already (see [Prior art & credits](#prior-art--credits)). This repo is the part nobody writes down: the dozen or so failure modes that turn a headless `codex exec` / `opencode run` / `agy -p` / `kimi -p` call into a hung terminal or an empty file, and how to make each one stop happening. The payload is one copy-installable Claude Code skill (`skills/headless-cli/SKILL.md`) that encodes every fix as a rule, plus this README explaining the *why*.
 
 If you have ever run one of these CLIs from a script, a CI step, or an agent harness and watched it hang forever or exit `0` with nothing on stdout — this is the missing manual.
 
@@ -20,6 +20,9 @@ If you have ever run one of these CLIs from a script, a CI step, or an agent har
 | Any headless call auth-fails even though the key is in `~/.bashrc` | The Claude Code Bash tool (and most agent harnesses) source neither `~/.bashrc` nor `~/.profile`. | Put the key in Claude Code's `settings.json` `env` block so it's injected into every Bash call. |
 | `codex` refuses **every** command on Ubuntu ("needs access to create user namespaces") | AppArmor blocks unprivileged user namespaces, so codex's bubblewrap sandbox can't start. | `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (persist in `/etc/sysctl.d/`). |
 | `inotify_add_watch … No space left on device` at opencode startup | The inotify **watch** limit, not disk. Only the file watcher dies; the run continues. | Non-fatal — don't kill/retry. Raise `fs.inotify.max_user_watches` if it bothers you. |
+| `kimi -r <session_id>` hangs forever — and the CLI itself told you to run it | Every headless `kimi -p` run ends by printing `To resume this session: kimi -r <id>`, but `-r` is not a headless flag: it drops into the interactive TUI, which then blocks on the harness's never-closing stdin. | Resume with `-S <id> -p "…"` instead. Read the id machine-readably from `--output-format stream-json` (`{"type":"session.resume_hint","session_id":…}`). |
+| `kimi -p … -y` (or `--auto`) does nothing: `error: Cannot combine --prompt with --yolo` | Unlike the other three CLIs, kimi's headless prompt mode already auto-approves tool calls, so the permission flags are rejected as contradictory rather than redundant. | Drop the flag — plain `kimi -p "…"` already reads *and writes* files. |
+| A JS-runtime CLI dies at login with an empty `fetch failed:` while `curl` to the same host works | The host has no IPv6 route, but the endpoint's DNS lists IPv6 first. Node-style `fetch` honours DNS order verbatim and never falls back; `curl` retries on IPv4 by itself, which is why manual testing "proves" the network is fine. | Make the resolver prefer IPv4 host-wide: `echo 'precedence ::ffff:0:0/96  100' \| sudo tee -a /etc/gai.conf`. Verify with `getent ahosts <host>` — `getent hosts` uses a legacy path that ignores `gai.conf`. |
 
 Every row is reproduced and fixed by the skill. The rest of this README is the setup and the recipes.
 
@@ -53,7 +56,7 @@ cp -r headless-cli-playbook/skills/headless-cli ~/.claude/skills/
 
 That's it — the skill is now loadable in any Claude Code session (on demand via its `description`, or explicitly with `/headless-cli`). You still need whichever CLIs you actually want to call installed and authed; see below.
 
-The skill and fixes are **verified on Linux** (see [Limits](#limits)). You do not need all three CLIs — install only the ones you'll use.
+The skill and fixes are **verified on Linux** (see [Limits](#limits)). You do not need all four CLIs — install only the ones you'll use.
 
 ---
 
@@ -156,6 +159,30 @@ Effort is the parenthetical in the model name. `agy` also lists non-Gemini optio
 
 Smoke test: `agy -p "reply: ok" < /dev/null`
 
+### `kimi` — Moonshot Kimi Code CLI (Kimi subscription OAuth)
+
+```bash
+curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash   # single binary, no Node required
+kimi --version
+kimi login                          # device-code flow; prints a URL + code, works over SSH
+```
+
+Default model and reasoning effort live in `~/.kimi-code/config.toml`. There is **no CLI effort flag** — set it here:
+
+```toml
+default_model = "kimi-code/k3"
+
+[thinking]
+enabled = true
+effort = "high"                     # low | high | max, per the model's support_efforts
+```
+
+> If `kimi login` fails with a bare `fetch failed:` while `curl https://auth.kimi.com/` succeeds, you've hit the IPv6 row in the gotchas table — apply the `gai.conf` fix before anything else.
+
+Two behaviours to internalise, both the inverse of the other CLIs: `-p` **already** auto-approves tool calls (adding `-y`/`--auto` is a hard error), and you resume with **`-S <id>`**, not the `-r <id>` the CLI's own output suggests.
+
+Smoke test: `kimi -p "reply: ok"`
+
 ---
 
 ## Recipe: the multi-turn peer teammate
@@ -163,7 +190,7 @@ Smoke test: `agy -p "reply: ok" < /dev/null`
 The under-used mode. `codex exec resume` (and `opencode -c` / `agy -c`) keep full context, model, and effort across rounds — so instead of a one-shot "review this", you can run a many-round back-and-forth with a different model as a genuine peer teammate: propose, critique, revise, re-critique, converge. In real projects the author runs `gpt-5.6-sol` this way over many rounds and finds it an excellent second brain, not just a review gate.
 
 > **Models the author currently runs** (a 2026-07 snapshot — these drift; any model each CLI supports works):
-> codex → `gpt-5.6-sol` @ `xhigh` · opencode → DeepSeek V4 `flash` (fast) / `pro` (deep) · agy → `Gemini 3.5 Flash (High)` / `Gemini 3.1 Pro (High)`.
+> codex → `gpt-5.6-sol` @ `xhigh` · opencode → DeepSeek V4 `flash` (fast) / `pro` (deep) · agy → `Gemini 3.5 Flash (High)` / `Gemini 3.1 Pro (High)` · kimi → `K3` @ `high`.
 
 The trick to making a loop terminate is a **VERDICT** convergence signal:
 
@@ -185,15 +212,16 @@ Use `resume <id>` (not `--last`) whenever another codex call might land in betwe
 
 ## Recipe: parallel fan-out
 
-Run all three at once. `codex` and `agy` parallelize as-is; `opencode` needs a private data dir per process (the SQLite race above):
+Run all four at once. `codex`, `agy`, and `kimi` parallelize as-is; `opencode` needs a private data dir per process (the SQLite race above):
 
 ```bash
 # one private data dir per opencode process
 ocp(){ local d; d=$(mktemp -d); XDG_DATA_HOME="$d/s" XDG_STATE_HOME="$d/t" opencode run "$@"; rm -rf "$d"; }
 
 codex exec "task A" < /dev/null > a.md &
-ocp   "task B"                    > b.md &
+ocp    "task B"                   > b.md &
 agy -p "task C" < /dev/null       > c.md &
+kimi -p "task D"                  > d.md &
 wait
 
 # many opencode tasks, capped at 5 concurrent:
@@ -215,7 +243,7 @@ This project stands on a lot of shoulders and deliberately does **not** try to b
 - **[antonbabenko/deliberation](https://github.com/antonbabenko/deliberation)** — a subscription-auth `codex` + `agy` deliberation stack; close cousin of the peer-teammate recipe here.
 - **Aseem Shrey's codex-review skill** — the `codex exec resume` multi-turn-review mechanism the peer-teammate recipe builds on; credit for demonstrating that pattern.
 
-What this repo adds that isn't written down elsewhere: the per-process `XDG_DATA_HOME` isolation for opencode's shared-SQLite bug, the DeepSeek relative-path-mangling → silent-empty-read rule, the `< /dev/null` stdin-deadlock fix, the output-truncation shape-check, and framing the multi-turn `resume` loop as an open-ended peer *teammate* rather than only a review gate. If you're building an orchestrator, treat this as the hardening notes to fold into it.
+What this repo adds that isn't written down elsewhere: the per-process `XDG_DATA_HOME` isolation for opencode's shared-SQLite bug, the DeepSeek relative-path-mangling → silent-empty-read rule, the `< /dev/null` stdin-deadlock fix, the output-truncation shape-check, kimi's `-r`-hint-that-hangs and its `-p`-is-already-autonomous inversion, the IPv6-first DNS trap that kills JS-runtime CLIs on IPv4-only hosts, and framing the multi-turn `resume` loop as an open-ended peer *teammate* rather than only a review gate. If you're building an orchestrator, treat this as the hardening notes to fold into it.
 
 ---
 
@@ -231,7 +259,7 @@ Read these before trusting a rule blindly:
 ## Roadmap
 
 - macOS verification pass (sandbox + inotify equivalents).
-- A `doctor` script that smoke-tests all three CLIs and prints the exact fix for each failure.
+- A `doctor` script that smoke-tests all four CLIs and prints the exact fix for each failure.
 - Contributed gotchas for more OpenAI-compatible providers behind `opencode`.
 - CI that re-runs the smoke tests against the latest CLI releases to catch flag drift.
 
