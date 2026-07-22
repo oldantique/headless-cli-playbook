@@ -1,6 +1,6 @@
 ---
 name: headless-cli
-description: Call another local AI CLI headlessly from a Bash call — codex, opencode, agy, or kimi — to delegate a subtask, get a second opinion from a different model, fan out work in parallel, or run a one-shot prompt and capture the result. Use when the user asks to use/ask codex, opencode, agy, kimi, gemini, gpt, deepseek, or k3; wants another model's take or a cross-model check; or when delegating coding/analysis to a non-Claude model is useful. Contains the exact verified flags plus the gotchas (stdin/sandbox/parallelism) that otherwise cause hung or empty calls.
+description: Call another local AI CLI headlessly from a Bash call — codex, opencode, agy, or kimi — to delegate a subtask, get a second opinion from a different model, fan out work in parallel, or run a one-shot prompt and capture the result. Use when the user asks to use/ask codex, opencode, agy, kimi, gemini, gpt, deepseek, or k3; wants another model's take or a cross-model check; when delegating coding/analysis to a non-Claude model is useful; or when the user wants an image generated (logo, banner, cover, illustration) — codex can do that headlessly. Contains the exact verified flags plus the gotchas (stdin/sandbox/parallelism) that otherwise cause hung or empty calls.
 user-invocable: true
 ---
 
@@ -81,6 +81,10 @@ printf '%s\n' "${prompts[@]}" | xargs -P 5 -I{} bash -c 'd=$(mktemp -d); XDG_DAT
 
 # codex built-in repo review
 codex exec review < /dev/null
+
+# generate an image — codex only (the others have no image models). State the aspect or you get a square.
+codex exec --sandbox workspace-write \
+  "Generate an image: <description>. 16:9 landscape. Save it into the current directory as ./cover.png, then print its path and dimensions." < /dev/null
 ```
 
 ## Hard rules (break one = wasted / hung call)
@@ -88,6 +92,8 @@ codex exec review < /dev/null
 **codex**
 - Always append `< /dev/null` (else it waits on stdin).
 - `-o <file>` to capture the answer (raw stdout is noisy). `--skip-git-repo-check` outside a git repo. `--sandbox workspace-write` to edit.
+- **Generated images land OUTSIDE your cwd.** `image_gen` writes to `~/.codex/generated_images/<session-uuid>/exec-*.png`; the run then reports success with no file where you expect one unless you both pass `--sandbox workspace-write` AND say "save it into the current directory as ./name.png". Recovery: `ls -t ~/.codex/generated_images/*/*.png | head -1`.
+- **Say the aspect ratio or you get a square** (measured: unprompted → 1254×1254; "16:9 landscape" → native 1672×941). codex has a shell, so asking for an exact size makes it chain ImageMagick. Budget a couple of minutes and tens of thousands of tokens per image — background it.
 
 **opencode**
 - **Parallel → private data dir per proc:** `XDG_DATA_HOME=$(mktemp -d) XDG_STATE_HOME=$(mktemp -d) opencode run …` (else concurrent runs hit `database is locked`). Only for parallel one-shots — `-c`/`-s` continue must use the default dir.
